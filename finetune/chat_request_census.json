@@ -1,0 +1,11 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Word: census\nRoot: census\nPhrase: \"At the time of the 2000 US census, 54.8% of African Americans lived in the South.\"\nIPA: \u02c8sen.s\u0259s\nDictionary meanings:\n- an official count or enumeration of members of a population (not necessarily human), usually residents or citizens in a particular region, often done at regular intervals\n- count, tally\n- a type of tax levied by feudal lords on peasants\n- (cellular automata) a count of the number of individual patterns within a larger pattern, most often the ash of a soup or a methuselah\n- to conduct a census on\n- to collect a census\nOutput:"
+    }
+  ],
+  "max_tokens": 120,
+  "temperature": 0.0,
+  "stop": ["<|im_end|>", "</s>", "<|eot_id|>", "<end_of_turn>"]
+}
