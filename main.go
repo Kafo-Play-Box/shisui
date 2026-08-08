@@ -6,13 +6,19 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/kafo-play-box/shisui/internal/augment"
 	"github.com/kafo-play-box/shisui/internal/extract"
 	"github.com/kafo-play-box/shisui/internal/lemma"
 	"github.com/kafo-play-box/shisui/internal/rewrite"
+	"github.com/kafo-play-box/shisui/internal/scrape"
 	"github.com/kafo-play-box/shisui/internal/yomitan"
 )
 
@@ -23,6 +29,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "scrape":
+		err = cmdScrape(os.Args[2:])
 	case "extract":
 		err = cmdExtract(os.Args[2:])
 	case "augment":
@@ -43,12 +51,138 @@ func usage() {
 	fmt.Fprint(os.Stderr, `shisui <command> [flags]
 
 commands:
+  scrape   [--force] [-o PATH] <input.html | input-dir | URL
   extract  [--lemma PATH] [--min-words N] [--max-words N] [--min-target-len N] [--force] [-o PATH] <input.txt
   augment  [--yomitan-url URL] [--yomitan-timeout DUR] [--concurrency N] [--force] [-o PATH] <input.jsonl
   rewrite  --api-url URL [--api-key KEY] [--model NAME] [--concurrency N] [--resume] [--force] -o PATH <input.jsonl
 
 input is read from stdin, or from a positional file argument.
+scrape additionally accepts a directory or an http(s) URL.
 `)
+}
+
+func cmdScrape(args []string) error {
+	fs := flag.NewFlagSet("scrape", flag.ContinueOnError)
+	outPath := fs.String("output", "", "output file (default: stdout)")
+	fs.StringVar(outPath, "o", "", "output file (default: stdout)")
+	force := fs.Bool("force", false, "overwrite an existing output file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return errors.New("too many input files")
+	}
+	out, closeOut, err := output(*outPath, *force)
+	if err != nil {
+		return err
+	}
+	defer closeOut()
+	if fs.NArg() == 0 {
+		return scrape.Run(os.Stdin, out)
+	}
+	arg := fs.Arg(0)
+	switch {
+	case strings.HasPrefix(arg, "http://"), strings.HasPrefix(arg, "https://"):
+		return scrapeURL(arg, out)
+	default:
+		fi, err := os.Stat(arg)
+		if err != nil {
+			return err
+		}
+		if fi.IsDir() {
+			return scrapeDir(arg, out)
+		}
+		f, err := os.Open(arg)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		return scrape.Run(f, out)
+	}
+}
+
+// scrapeURL fetches url and scrapes the response body. Non-2xx responses are
+// errors.
+func scrapeURL(url string, w io.Writer) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("scrape: %s returned status %s", url, resp.Status)
+	}
+	return scrape.Run(resp.Body, w)
+}
+
+// scrapeDir walks dir for *.html/*.htm files in sorted order and scrapes each
+// into w, one blank line between files. A file that fails to open or parse is
+// logged to stderr and skipped; the walk continues. Only one file's output is
+// held in memory at a time.
+func scrapeDir(dir string, w io.Writer) error {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		ext := filepath.Ext(path)
+		if ext == ".html" || ext == ".htm" {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	first := true
+	for _, path := range files {
+		f, err := os.Open(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scrape: %s: %v\n", path, err)
+			continue
+		}
+		var buf bytes.Buffer
+		if err := scrape.Run(f, &buf); err != nil {
+			f.Close()
+			fmt.Fprintf(os.Stderr, "scrape: %s: %v\n", path, err)
+			continue
+		}
+		f.Close()
+		if buf.Len() == 0 {
+			continue
+		}
+		if !first {
+			if err := writeAll(w, []byte("\n\n")); err != nil {
+				return err
+			}
+		}
+		first = false
+		if err := writeAll(w, buf.Bytes()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeAll writes b to w, looping over partial writes until all bytes are
+// written or an error occurs.
+func writeAll(w io.Writer, b []byte) error {
+	for len(b) > 0 {
+		n, err := w.Write(b)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		b = b[n:]
+	}
+	return nil
 }
 
 func cmdExtract(args []string) error {

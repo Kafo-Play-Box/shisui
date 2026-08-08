@@ -9,12 +9,15 @@ for ESL learners.
 
 ## Pipeline
 
-Three subcommands chained via JSONL files:
+Four subcommands chained via files:
 
 ```
-text  --extract-->  rows  --augment-->  enriched rows  --rewrite-->  dataset
+HTML  --scrape-->  plaintext  --extract-->  rows  --augment-->  enriched rows  --rewrite-->  dataset
 ```
 
+- `scrape` — reads HTML (file, directory, URL, or stdin), parses the DOM,
+  strips navigation, code blocks, and other chrome, and emits clean
+  paragraph-separated plaintext. This is stage 0.
 - `extract` — cleans the text (URLs, figure captions, hashtags, whitespace),
   splits it into sentences, and picks one target word per sentence: the
   lemmatizable word whose root is least frequent in the embedded lemma
@@ -27,7 +30,8 @@ text  --extract-->  rows  --augment-->  enriched rows  --rewrite-->  dataset
 
 ## Install
 
-Requires Go 1.26.5. No external dependencies.
+Requires Go 1.26.5. One external dependency: `golang.org/x/net/html` (for the
+`scrape` subcommand).
 
 ```bash
 go build -trimpath -o shisui .
@@ -61,15 +65,35 @@ All tools read from stdin (or a positional file argument) and write to stdout
 unless `-o PATH` is given.
 
 ```
+shisui scrape   [--force] [-o PATH] <input.html | input-dir | URL
 shisui extract  [--lemma PATH] [--min-words N] [--max-words N] [--force] [-o PATH] <input.txt
 shisui augment  [--yomitan-url URL] [--yomitan-timeout DUR] [--concurrency N] [--force] [-o PATH] <input.jsonl
 shisui rewrite  --api-url URL [--api-key KEY] [--model NAME] [--concurrency N] [--resume] [--force] -o PATH <input.jsonl
 ```
 
-All three subcommands refuse to overwrite an existing `-o` file unless
+All four subcommands refuse to overwrite an existing `-o` file unless
 `--force` is given. `rewrite --resume` appends to an existing output and
 skips rows already present (keyed by a sha256 of `target_word + phrase`);
 `--force` and `--resume` are mutually exclusive.
+
+### scrape
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--force` | `false` | overwrite an existing output file |
+| `--output` / `-o` | stdout | output file |
+
+Input modes: a file path scrapes that file; a directory walks it for
+`*.html`/`*.htm` files in sorted order (scraping continues past a file that
+fails to parse, with a warning on stderr); an `http://`/`https://` URL is
+fetched (30s timeout, non-2xx is an error); nothing reads stdin.
+
+Navigation, footers, sidebars, tables of contents, edit links, citations,
+script/style, and hidden elements are dropped. `<pre>` code blocks are dropped
+entirely — code is not a sentence. Inline `<code>`, `<samp>`, `<kbd>`, and
+`<var>` text is kept and joined into the surrounding sentence (no tags, no
+separate line). `<img alt="...">` becomes its own paragraph; empty alts are
+skipped. Output is one paragraph per block, blocks separated by blank lines.
 
 ### extract
 

@@ -59,6 +59,52 @@ func TestOutput_ExistingWithForce_OK(t *testing.T) {
 	}
 }
 
+func TestScrapeDirectoryMode(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out.txt")
+	dir := filepath.Join("internal", "scrape", "testdata", "directory_fixture")
+	if err := cmdScrape([]string{"-o", out, dir}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sorted order: page1.html before sub/page2.html, one blank line between.
+	if want := "Page one.\n\nPage two."; string(data) != want {
+		t.Errorf("got %q, want %q", data, want)
+	}
+}
+
+func TestScrapeURLMode(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "<p>Hello from the web.</p>")
+	}))
+	defer ts.Close()
+	out := filepath.Join(t.TempDir(), "out.txt")
+	if err := cmdScrape([]string{"-o", out, ts.URL}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Hello from the web."; string(data) != want {
+		t.Errorf("got %q, want %q", data, want)
+	}
+}
+
+func TestScrapeURLMode_Error(t *testing.T) {
+	ts := httptest.NewServer(http.NotFoundHandler())
+	defer ts.Close()
+	err := cmdScrape([]string{ts.URL + "/missing"})
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestRewrite_ForceAndResume_Error(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "out.jsonl")
 	err := cmdRewrite([]string{"--api-url", "http://127.0.0.1:1", "--output", p, "--force", "--resume"})
