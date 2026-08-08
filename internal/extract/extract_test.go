@@ -388,6 +388,143 @@ func TestCleaningHyphens(t *testing.T) {
 	}
 }
 
+func TestCleaningDomains(t *testing.T) {
+	const text = "The cat saw freeCodeCamp.org and console.anthropic.com today."
+	rows := runExtract(t, text, testDB(t), 1, 80)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].Phrase != "The cat saw and today." {
+		t.Errorf("phrase = %q, want %q", rows[0].Phrase, "The cat saw and today.")
+	}
+	if strings.Contains(rows[0].Phrase, "freeCodeCamp") || strings.Contains(rows[0].Phrase, "anthropic") || strings.Contains(rows[0].Phrase, "console") {
+		t.Errorf("phrase still contains a domain: %q", rows[0].Phrase)
+	}
+}
+
+func TestCleaningDomains_NegativesPreserved(t *testing.T) {
+	// T. rex, U.S., e.g. are not domains (a dot needs a TLD right after it);
+	// the DOI 10.64628/AA.tafck7dd3 is stripped entirely by doiRe, not as a
+	// domain, and must leave no remnant behind. Asserted on clean() because
+	// splitSentences splits "U.S." at "U."/"S." regardless of cleaning.
+	got := clean("T. rex in the U.S. via e.g., but 10.64628/AA.tafck7dd3 vanished.")
+	for _, frag := range []string{"T. rex", "U.S.", "e.g."} {
+		if !strings.Contains(got, frag) {
+			t.Errorf("clean() lost prose %q: %q", frag, got)
+		}
+	}
+	if strings.Contains(got, "10.64628") || strings.Contains(got, "tafck7dd3") {
+		t.Errorf("clean() left a DOI remnant: %q", got)
+	}
+}
+
+func TestCleaningUUID(t *testing.T) {
+	const text = "The cat lost id 123e4567-e89b-12d3-a456-426614174000 in the bank."
+	rows := runExtract(t, text, testDB(t), 1, 80)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].Phrase != "The cat lost id in the bank." {
+		t.Errorf("phrase = %q, want %q", rows[0].Phrase, "The cat lost id in the bank.")
+	}
+	if strings.Contains(rows[0].Phrase, "123e4567") || strings.Contains(rows[0].Phrase, "-") {
+		t.Errorf("phrase still contains a UUID remnant: %q", rows[0].Phrase)
+	}
+}
+
+func TestCleaningDOI(t *testing.T) {
+	const text = "The cat read 10.64628/AA.tafck7dd3 and ran."
+	rows := runExtract(t, text, testDB(t), 1, 80)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].Phrase != "The cat read and ran." {
+		t.Errorf("phrase = %q, want %q", rows[0].Phrase, "The cat read and ran.")
+	}
+	if strings.Contains(rows[0].Phrase, "10.64628") || strings.Contains(rows[0].Phrase, "tafck7dd3") {
+		t.Errorf("phrase still contains a DOI remnant: %q", rows[0].Phrase)
+	}
+}
+
+func TestCleaningCodeParagraph(t *testing.T) {
+	const text = "The cat ran to the bank.\n\n" +
+		"import numpy as np\nfrom sentence_transformers import SentenceTransformer\n\n" +
+		"collection = [\n    \"AWS Lambda reclaims idle execution environments.\",\n]\n\n" +
+		"def retrieve(query):\n    return query\n\n" +
+		"The dog barked very loudly.\n"
+	rows := runExtract(t, text, testDB(t), 5, 80)
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2 (code block yields none)", len(rows))
+	}
+	want := []string{"The cat ran to the bank.", "The dog barked very loudly."}
+	for i, row := range rows {
+		if row.Phrase != want[i] {
+			t.Errorf("phrase %d = %q, want %q", i, row.Phrase, want[i])
+		}
+		for _, junk := range []string{"import", "collection", "def", "numpy", "retrieve"} {
+			if strings.Contains(row.Phrase, junk) {
+				t.Errorf("phrase %d %q contains code junk %q", i, row.Phrase, junk)
+			}
+		}
+	}
+}
+
+func TestCleaningNavList(t *testing.T) {
+	const text = "Menu\nDonate\nJuly 22, 2026\n\nThe cat ran to the bank."
+	rows := runExtract(t, text, testDB(t), 5, 80)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (nav block yields none)", len(rows))
+	}
+	if rows[0].Phrase != "The cat ran to the bank." {
+		t.Errorf("phrase = %q, want %q", rows[0].Phrase, "The cat ran to the bank.")
+	}
+}
+
+func TestCleaningRepeatedByline(t *testing.T) {
+	const text = "Sameer Shukla\nSameer Shukla\n\nThe cat ran to the bank."
+	rows := runExtract(t, text, testDB(t), 5, 80)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (repeated byline yields none)", len(rows))
+	}
+	if rows[0].Phrase != "The cat ran to the bank." {
+		t.Errorf("phrase = %q, want %q", rows[0].Phrase, "The cat ran to the bank.")
+	}
+}
+
+func TestCleaningTitleBylineTitle(t *testing.T) {
+	// Scraped article headers echo the title around the byline. The repeated
+	// title line marks the whole paragraph as boilerplate; no row may carry
+	// the byline.
+	const text = "What Is HyDE? How to Improve RAG with Hypothetical Documents\n" +
+		"Sameer Shukla\nSameer Shukla\n" +
+		"What Is HyDE? How to Improve RAG with Hypothetical Documents\n\n" +
+		"The cat ran to the bank."
+	rows := runExtract(t, text, testDB(t), 5, 80)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1 (title/byline echo yields none)", len(rows))
+	}
+	if rows[0].Phrase != "The cat ran to the bank." {
+		t.Errorf("phrase = %q, want %q", rows[0].Phrase, "The cat ran to the bank.")
+	}
+	if strings.Contains(rows[0].Phrase, "Sameer") || strings.Contains(rows[0].Phrase, "Shukla") {
+		t.Errorf("phrase %q still contains the byline", rows[0].Phrase)
+	}
+}
+
+func TestCleaningProseSurvives(t *testing.T) {
+	const text = "Instead of asking an LLM to answer entirely from its training data, a RAG system retrieves relevant information from an external knowledge base and provides that information to the model as context."
+	rows := runExtract(t, text, testDB(t), 5, 80)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].TargetWord != "model" || rows[0].RootWord != "model" {
+		t.Errorf("row = %+v, want model target", rows[0])
+	}
+	if !strings.Contains(rows[0].Phrase, "Instead of asking an LLM to answer entirely from its training data") {
+		t.Errorf("phrase lost the opening clause: %q", rows[0].Phrase)
+	}
+}
+
 func TestCorpusIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping corpus integration in -short mode")
@@ -408,10 +545,13 @@ func TestCorpusIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := runExtract(t, string(text), db, 10, 80)
-	if len(rows) < 50 {
-		t.Fatalf("got %d rows, want at least 50", len(rows))
+	// 1284 rows at baseline; phrase cleaning (code blocks, nav lists,
+	// article headers) drops the scraped junk. 1000 leaves a comfortable
+	// margin below the measured 1230 while still catching a broken filter.
+	if len(rows) < 1000 {
+		t.Fatalf("got %d rows, want at least 1000", len(rows))
 	}
-	noise := regexp.MustCompile(`https?://|www\.|Figure[ ]*[0-9]|#[A-Z]`)
+	noise := regexp.MustCompile(`https?://|www\.|Figure[ ]*[0-9]|#[A-Z]|import |collection = \[|Sameer Shukla|Menu|Donate|Skip to content|Published:|Table of Contents|freeCodeCamp\.org|console\.anthropic\.com|10\.64628|[0-9a-f]{8}-[0-9a-f]{4}`)
 	seen := make(map[string]bool)
 	for _, row := range rows {
 		if noise.MatchString(row.Phrase) {
@@ -425,10 +565,6 @@ func TestCorpusIntegration(t *testing.T) {
 		}
 		seen[row.Phrase] = true
 	}
-}
-
-func wordCount(phrase string) int {
-	return len(strings.Fields(phrase))
 }
 
 func wordIndex(phrase, word string) int {

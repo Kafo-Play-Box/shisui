@@ -36,20 +36,96 @@ type Options struct {
 }
 
 var (
-	urlRe  = regexp.MustCompile(`https?://\S+|www\.\S+`)
-	figRe  = regexp.MustCompile(`(?i)Figure\s*\d+\s*:?\s*`)
-	hashRe = regexp.MustCompile(`(?m)^#\w+\s*`)
-	wsRe   = regexp.MustCompile(`[ \t]+`)
-	nlRe   = regexp.MustCompile(`\n{3,}`)
+	urlRe       = regexp.MustCompile(`https?://\S+|www\.\S+`)
+	figRe       = regexp.MustCompile(`(?i)Figure\s*\d+\s*:?\s*`)
+	hashRe      = regexp.MustCompile(`(?m)^#\w+\s*`)
+	wsRe        = regexp.MustCompile(`[ \t]+`)
+	nlRe        = regexp.MustCompile(`\n{3,}`)
+	domainRe    = regexp.MustCompile(`(?i)\b[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}(?:/[^\s]*)?\b`)
+	uuidRe      = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+	doiRe       = regexp.MustCompile(`\b10\.\d{4,}/[A-Za-z0-9._/-]+\b`)
+	codeLineRe  = regexp.MustCompile(`(?m)^[ \t]*(?:import |from |def |if __name__|print\(|return |# )`)
+	codeTokenRe = regexp.MustCompile(` = \[|= \{|\bHYDE_PROMPT\b|\bPII_PATTERNS\b|client\.messages\.create\(|np\.argsort|\.tolist\(\)| @ |logger\.`)
+	publishedRe = regexp.MustCompile(`(?m)^Published:`)
 )
 
 func clean(text string) string {
 	s := urlRe.ReplaceAllString(text, "")
+	s = domainRe.ReplaceAllString(s, "")
+	s = uuidRe.ReplaceAllString(s, "")
+	s = doiRe.ReplaceAllString(s, "")
 	s = figRe.ReplaceAllString(s, "")
 	s = hashRe.ReplaceAllString(s, "")
 	s = wsRe.ReplaceAllString(s, " ")
 	s = nlRe.ReplaceAllString(s, "\n\n")
 	return strings.TrimSpace(s)
+}
+
+// filterBoilerplate drops scraped-web junk paragraphs (code, nav lists,
+// too-short filler) before sentence splitting. A paragraph with fewer than
+// minWords can never yield a row, so dropping it is lossless.
+func filterBoilerplate(text string, minWords int) string {
+	var keep []string
+	for _, p := range strings.Split(text, "\n\n") {
+		p = strings.TrimSpace(p)
+		if p == "" || isCodeParagraph(p) || isNavList(p) || publishedRe.MatchString(p) || wordCount(p) < minWords {
+			continue
+		}
+		p = collapseDupLines(p)
+		if hasDupLine(p) {
+			continue
+		}
+		keep = append(keep, p)
+	}
+	return strings.Join(keep, "\n\n")
+}
+
+func isCodeParagraph(p string) bool {
+	return codeLineRe.MatchString(p) || codeTokenRe.MatchString(p)
+}
+
+func isNavList(p string) bool {
+	lines := strings.Split(p, "\n")
+	if len(lines) < 2 {
+		return false
+	}
+	for _, l := range lines {
+		if wordCount(l) > 5 || strings.ContainsAny(l, ".!?;:…") {
+			return false
+		}
+	}
+	return true
+}
+
+// collapseDupLines removes immediately repeated lines
+// ("Sameer Shukla\nSameer Shukla" -> "Sameer Shukla").
+func collapseDupLines(p string) string {
+	lines := strings.Split(p, "\n")
+	out := lines[:1]
+	for _, l := range lines[1:] {
+		if l != out[len(out)-1] {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// hasDupLine reports whether any line of p appears more than once. Scraped
+// article headers echo the title around the byline ("title\nbyline\ntitle");
+// real prose never repeats a full line.
+func hasDupLine(p string) bool {
+	seen := make(map[string]bool, wordCount(p)/5+2)
+	for _, l := range strings.Split(p, "\n") {
+		if seen[l] {
+			return true
+		}
+		seen[l] = true
+	}
+	return false
+}
+
+func wordCount(s string) int {
+	return len(strings.Fields(s))
 }
 
 // Run extracts rows from the plaintext on r and writes JSONL to w.
@@ -69,7 +145,7 @@ func Run(r io.Reader, w io.Writer, opts Options) error {
 	}
 	enc := jsonl.NewEncoder[Row](w)
 	seen := make(map[string]bool)
-	for _, sent := range splitSentences(clean(string(text))) {
+	for _, sent := range splitSentences(filterBoilerplate(clean(string(text)), opts.MinWords)) {
 		toks := tokenize(sent)
 		if len(toks) < opts.MinWords {
 			continue
