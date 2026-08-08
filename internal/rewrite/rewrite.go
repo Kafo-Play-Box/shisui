@@ -54,6 +54,7 @@ type Options struct {
 	APIKey      string
 	Model       string
 	Concurrency int
+	Delay       time.Duration // sleep between requests, to respect rate limits
 	Resume      bool
 }
 
@@ -126,6 +127,9 @@ func Run(r io.Reader, w io.WriteSeeker, opts Options) error {
 			defer wg.Done()
 			for j := range jobsCh {
 				resultsCh <- processJob(ctx, opts, j)
+				if opts.Delay > 0 {
+					time.Sleep(opts.Delay)
+				}
 			}
 		}()
 	}
@@ -321,12 +325,13 @@ func parseContent(content string, meanings []string) (llmResult, error) {
 }
 
 type chatRequest struct {
-	Model          string            `json:"model"`
-	Messages       []chatMessage     `json:"messages"`
-	Temperature    float64           `json:"temperature"`
-	MaxTokens      int               `json:"max_tokens"`
-	ResponseFormat map[string]string `json:"response_format"`
-	Thinking       map[string]string `json:"thinking,omitempty"`
+	Model           string            `json:"model"`
+	Messages        []chatMessage     `json:"messages"`
+	Temperature     float64           `json:"temperature"`
+	MaxTokens       int               `json:"max_tokens"`
+	ResponseFormat  map[string]string `json:"response_format"`
+	Thinking        map[string]string `json:"thinking,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
 }
 
 type chatMessage struct {
@@ -371,6 +376,13 @@ func buildBody(opts Options, row InRow) (io.Reader, error) {
 	// max_tokens budget on reasoning_content, returning empty content.
 	if strings.HasPrefix(opts.Model, "deepseek") {
 		req.Thinking = map[string]string{"type": "disabled"}
+	}
+	// Gemini flash models also think by default through the OpenAI-compat
+	// endpoint, starving the 150-token budget and truncating the JSON. The
+	// endpoint rejects DeepSeek-style "thinking"; it takes "reasoning_effort"
+	// instead. "minimal" is the lowest level flash accepts ("none" is invalid).
+	if strings.HasPrefix(opts.Model, "gemini") {
+		req.ReasoningEffort = "minimal"
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

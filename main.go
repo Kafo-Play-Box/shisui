@@ -55,7 +55,7 @@ commands:
   scrape   [--force] [-o PATH] <input.html | input-dir | input.zim | URL
   extract  [--lemma PATH] [--min-words N] [--max-words N] [--min-target-len N] [--force] [-o PATH] <input.txt
   augment  [--yomitan-url URL] [--yomitan-timeout DUR] [--concurrency N] [--force] [-o PATH] <input.jsonl
-  rewrite  --api-url URL [--api-key KEY] [--model NAME] [--concurrency N] [--resume] [--force] -o PATH <input.jsonl
+  rewrite  --api-url URL [--api-key KEY] [--model NAME] [--concurrency N] [--delay DUR] [--resume] [--force] -o PATH <input.jsonl
 
 input is read from stdin, or from a positional file argument.
 scrape additionally accepts a directory, a .zim file, or an http(s) URL.
@@ -331,6 +331,7 @@ func cmdRewrite(args []string) error {
 	apiKey := fs.String("api-key", "", "API key (default: SHISUI_API_KEY env)")
 	model := fs.String("model", "gpt-4o-mini", "model name")
 	concurrency := fs.Int("concurrency", 4, "parallel API workers")
+	delay := fs.Duration("delay", 0, "sleep this long between requests (rate limiting)")
 	resume := fs.Bool("resume", false, "skip rows already present in the output file")
 	force := fs.Bool("force", false, "truncate and rewrite the output file from scratch")
 	outPath := fs.String("output", "", "output file (required)")
@@ -377,6 +378,7 @@ func cmdRewrite(args []string) error {
 		APIKey:      key,
 		Model:       *model,
 		Concurrency: *concurrency,
+		Delay:       *delay,
 		Resume:      *resume,
 	})
 }

@@ -125,6 +125,7 @@ skipped. Output is one paragraph per block, blocks separated by blank lines.
 | `--api-key` | env `SHISUI_API_KEY` | API key (flag wins) |
 | `--model` | `gpt-4o-mini` | model name |
 | `--concurrency` | `4` | parallel workers |
+| `--delay` | `0` | sleep between requests (e.g. `--delay 2s`) to respect rate limits |
 | `--resume` | `false` | skip rows already present in the output file |
 | `--force` | `false` | overwrite an existing output file (mutually exclusive with `--resume`) |
 | `--output` / `-o` | required | output file |
