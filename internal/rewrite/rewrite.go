@@ -326,6 +326,7 @@ type chatRequest struct {
 	Temperature    float64           `json:"temperature"`
 	MaxTokens      int               `json:"max_tokens"`
 	ResponseFormat map[string]string `json:"response_format"`
+	Thinking       map[string]string `json:"thinking,omitempty"`
 }
 
 type chatMessage struct {
@@ -365,6 +366,11 @@ func buildBody(opts Options, row InRow) (io.Reader, error) {
 		Temperature:    0.3,
 		MaxTokens:      150,
 		ResponseFormat: map[string]string{"type": "json_object"},
+	}
+	// DeepSeek models are thinking-enabled by default and burn the whole
+	// max_tokens budget on reasoning_content, returning empty content.
+	if strings.HasPrefix(opts.Model, "deepseek") {
+		req.Thinking = map[string]string{"type": "disabled"}
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
