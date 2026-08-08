@@ -52,6 +52,7 @@ merge peaks around 0.6 GB of RAM.
 | File | Purpose |
 |------|---------|
 | `TUTORIAL.md` | the full journey, scraped page to serving model, explained |
+| `PROMPT.md` | the exact prompt + answer format for the fine-tuned model (for wrappers) |
 | `finetune_run.py` | Colab training script (LoRA SFT on gemma-3-270m-it) |
 | `merge.py` | merge LoRA adapter into the base model (local) |
 | `patch_gguf_token_types.py` | fix `<start_of_turn>` token metadata in a GGUF |

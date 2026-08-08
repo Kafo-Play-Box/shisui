@@ -96,12 +96,16 @@ def make_user_prompt(row):
 
 def make_answer(row):
     """The exact JSON the model must learn to write, including the IPA it has
-    to pronounce from the word alone."""
+    to pronounce from the word alone.
+
+    selected_meaning comes first: committing to the meaning before writing
+    the definition mirrors the rewrite prompt's example order, and forces the
+    model to make that decision before the simpler fields."""
     ipa = row.get("ipa", "")
     return (
-        f'{{"quality": "{row["quality"]}", '
+        f'{{"selected_meaning": "{row["selected_meaning"]}", '
         f'"simple_meaning": "{row["simple_meaning"]}", '
-        f'"selected_meaning": "{row["selected_meaning"]}", '
+        f'"quality": "{row["quality"]}", '
         f'"predicted_ipa": "{ipa}"}}'
     )
 
