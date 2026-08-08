@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kafo-play-box/shisui/internal/jsonl"
 	"github.com/kafo-play-box/shisui/internal/lemma"
@@ -16,6 +17,8 @@ be/4109826 -> is,was,were,are,been
 do/535646 -> did,does,done,doing
 run/44715 -> running,ran,runs
 it/1213224 -> its
+k/10 -> k
+cs/20 -> cs
 bank/100 -> banks
 cat/5400 -> cats
 fox/5000 -> foxes
@@ -51,8 +54,12 @@ func testDB(t *testing.T) *lemma.DB {
 
 func runExtract(t *testing.T, text string, db *lemma.DB, min, max int) []Row {
 	t.Helper()
+	return runExtractOpts(t, text, Options{LemmaDB: db, MinWords: min, MaxWords: max})
+}
+
+func runExtractOpts(t *testing.T, text string, opts Options) []Row {
+	t.Helper()
 	var buf bytes.Buffer
-	opts := Options{LemmaDB: db, MinWords: min, MaxWords: max}
 	if err := Run(strings.NewReader(text), &buf, opts); err != nil {
 		t.Fatal(err)
 	}
@@ -277,6 +284,48 @@ func TestMissingFreqIsRarest(t *testing.T) {
 	}
 	if rows[0].TargetWord != "quays" || rows[0].RootWord != "quay" {
 		t.Errorf("row = %+v, want quay (freq 0) over river/bank", rows[0])
+	}
+}
+
+func TestMinTargetLen_ShortOnlySentenceDropped(t *testing.T) {
+	// k, cs and it are the only lemmatizable words, all shorter than the
+	// default MinTargetLen of 3: the sentence must yield no row.
+	const text = "The k cs it."
+	rows := runExtract(t, text, testDB(t), 1, 80)
+	if len(rows) != 0 {
+		t.Fatalf("got %d rows, want 0 (every lemmatizable word shorter than 3 runes)", len(rows))
+	}
+}
+
+func TestMinTargetLen_ExplicitOneRestoresShortTargets(t *testing.T) {
+	// With the filter at 1, the short words are eligible again and the
+	// least-common one (k, freq 10) is chosen as before.
+	const text = "The k cs it."
+	rows := runExtractOpts(t, text, Options{LemmaDB: testDB(t), MinWords: 1, MaxWords: 80, MinTargetLen: 1})
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].TargetWord != "k" || rows[0].RootWord != "k" {
+		t.Errorf("row = %+v, want k (freq 10) over cs (freq 20) and it", rows[0])
+	}
+}
+
+func TestMinTargetLen_MixNeverPicksShortTarget(t *testing.T) {
+	// k has the lowest frequency (10) but is shorter than the threshold, so
+	// bank (100) must win over k and ran (run, 44715). No row may ever carry
+	// a target shorter than MinTargetLen.
+	const text = "The k ran to the bank."
+	rows := runExtractOpts(t, text, Options{LemmaDB: testDB(t), MinWords: 1, MaxWords: 80, MinTargetLen: 3})
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].TargetWord != "bank" || rows[0].RootWord != "bank" {
+		t.Errorf("row = %+v, want bank (k filtered out despite freq 10)", rows[0])
+	}
+	for _, row := range rows {
+		if utf8.RuneCountInString(row.TargetWord) < 3 {
+			t.Errorf("target %q shorter than MinTargetLen 3", row.TargetWord)
+		}
 	}
 }
 

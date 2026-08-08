@@ -1,0 +1,8 @@
+Word: {{.TargetWord}}
+Root: {{.RootWord}}
+Phrase: "{{.Phrase}}"
+IPA: {{.IPA}}
+Dictionary meanings:
+{{range .Meanings}}- {{.}}
+{{end}}
+Output:

@@ -45,8 +45,11 @@ go build -trimpath -o shisui .
 Each row of the final dataset looks like:
 
 ```json
-{"target_word":"running","root_word":"run","phrase":"The children had to run to keep up with their father.","ipa":"rʌn","meanings":["to move along faster than walking","to operate or function"],"simple_meaning":"to move quickly on your feet","quality":"good"}
+{"target_word":"running","root_word":"run","phrase":"The children had to run to keep up with their father.","ipa":"rʌn","meanings":["to move along faster than walking","to operate or function"],"simple_meaning":"to move quickly on your feet","quality":"good","selected_meaning":"to move along faster than walking"}
 ```
+
+`selected_meaning` is a verbatim copy of the dictionary meaning the model
+chose; it is `""` when no provided meaning matched the phrase.
 
 The `_key` field written during `rewrite` is a sha256 of
 `target_word + "\x00" + phrase` used only for resume dedup. Drop it for the

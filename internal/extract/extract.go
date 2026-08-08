@@ -6,10 +6,15 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kafo-play-box/shisui/internal/jsonl"
 	"github.com/kafo-play-box/shisui/internal/lemma"
 )
+
+// defaultMinTargetLen is the minimum rune length a target candidate must have
+// when Options.MinTargetLen is unset.
+const defaultMinTargetLen = 3
 
 // Row is one extracted phrase targeting a word.
 type Row struct {
@@ -23,6 +28,11 @@ type Options struct {
 	LemmaDB  *lemma.DB
 	MinWords int
 	MaxWords int
+	// MinTargetLen is the minimum length in runes a token must have to be
+	// eligible as a target. Shorter tokens stay in the phrase for context
+	// but can never be the target. Values below 1 fall back to
+	// defaultMinTargetLen.
+	MinTargetLen int
 }
 
 var (
@@ -50,6 +60,9 @@ func Run(r io.Reader, w io.Writer, opts Options) error {
 	if opts.MinWords < 1 || opts.MaxWords < opts.MinWords {
 		return errors.New("extract: min-words must be at least 1 and max-words at least min-words")
 	}
+	if opts.MinTargetLen < 1 {
+		opts.MinTargetLen = defaultMinTargetLen
+	}
 	text, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -63,6 +76,9 @@ func Run(r io.Reader, w io.Writer, opts Options) error {
 		}
 		bestIdx, bestRoot, bestFreq := -1, "", 0
 		for i, tok := range toks {
+			if utf8.RuneCountInString(tok.word) < opts.MinTargetLen {
+				continue
+			}
 			root, freq, ok := opts.LemmaDB.Lookup(tok.word)
 			if !ok {
 				continue

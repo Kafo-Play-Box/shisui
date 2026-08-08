@@ -43,7 +43,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `shisui <command> [flags]
 
 commands:
-  extract  [--lemma PATH] [--min-words N] [--max-words N] [--force] [-o PATH] <input.txt
+  extract  [--lemma PATH] [--min-words N] [--max-words N] [--min-target-len N] [--force] [-o PATH] <input.txt
   augment  [--yomitan-url URL] [--yomitan-timeout DUR] [--concurrency N] [--force] [-o PATH] <input.jsonl
   rewrite  --api-url URL [--api-key KEY] [--model NAME] [--concurrency N] [--resume] [--force] -o PATH <input.jsonl
 
@@ -57,6 +57,7 @@ func cmdExtract(args []string) error {
 	fs.StringVar(lemmaPath, "l", "", "custom lemma file (default: embedded)")
 	minWords := fs.Int("min-words", 10, "drop phrases with fewer words than this")
 	maxWords := fs.Int("max-words", 80, "truncate phrases longer than this many words")
+	minTargetLen := fs.Int("min-target-len", 3, "drop candidate targets shorter than this many characters")
 	outPath := fs.String("output", "", "output file (default: stdout)")
 	fs.StringVar(outPath, "o", "", "output file (default: stdout)")
 	force := fs.Bool("force", false, "overwrite an existing output file")
@@ -86,7 +87,7 @@ func cmdExtract(args []string) error {
 	if err != nil {
 		return err
 	}
-	return extract.Run(in, out, extract.Options{LemmaDB: db, MinWords: *minWords, MaxWords: *maxWords})
+	return extract.Run(in, out, extract.Options{LemmaDB: db, MinWords: *minWords, MaxWords: *maxWords, MinTargetLen: *minTargetLen})
 }
 
 func cmdAugment(args []string) error {

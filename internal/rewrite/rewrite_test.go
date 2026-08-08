@@ -54,18 +54,24 @@ func newMockChat(t *testing.T) *mockChat {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		case strings.Contains(content, "fail500"):
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"recovered after retries\",\"quality\":\"medium\"}"}}]}`)
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"recovered after retries\",\"quality\":\"medium\",\"selected_meaning\":\"to move fast\"}"}}]}`)
 		case strings.Contains(content, "forbidden"):
 			w.WriteHeader(http.StatusForbidden)
 			return
 		case strings.Contains(content, "xyzzy"):
 			fmt.Fprint(w, `{"choices":[{"message":{"content":"not json"}}]}`)
+		case strings.Contains(content, "paraphrase"):
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"to move quickly on your feet\",\"quality\":\"good\",\"selected_meaning\":\"to go fast\"}"}}]}`)
+		case strings.Contains(content, "no-selected"):
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"to move quickly on your feet\",\"quality\":\"good\"}"}}]}`)
+		case strings.Contains(content, "empty-selected"):
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"to move quickly on your feet\",\"quality\":\"medium\",\"selected_meaning\":\"\"}"}}]}`)
 		case strings.Contains(content, "weird"):
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"ok def\",\"quality\":\"excellent\"}"}}]}`)
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"ok def\",\"quality\":\"excellent\",\"selected_meaning\":\"to move fast\"}"}}]}`)
 		case strings.Contains(content, "empty"):
 			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"\",\"quality\":\"good\"}"}}]}`)
 		default:
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"to move quickly on your feet\",\"quality\":\"good\"}"}}]}`)
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"{\"simple_meaning\":\"to move quickly on your feet\",\"quality\":\"good\",\"selected_meaning\":\"to move fast\"}"}}]}`)
 		}
 	})
 	m.ts = httptest.NewServer(mux)
@@ -114,7 +120,7 @@ func TestHappyPath(t *testing.T) {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
 	row := rows[0]
-	if row.SimpleMeaning != "to move quickly on your feet" || row.Quality != "good" {
+	if row.SimpleMeaning != "to move quickly on your feet" || row.Quality != "good" || row.SelectedMeaning != "to move fast" {
 		t.Errorf("row = %+v", row)
 	}
 	if row.TargetWord != "running" || row.RootWord != "running" || row.Phrase != "they were running." || row.IPA != "rʌn" {
@@ -139,7 +145,7 @@ func TestInvalidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows[0].SimpleMeaning != "" || rows[0].Quality != "bad" {
+	if rows[0].SimpleMeaning != "" || rows[0].Quality != "bad" || rows[0].SelectedMeaning != "" {
 		t.Errorf("invalid JSON row = %+v, want empty meaning and bad quality", rows[0])
 	}
 	m.mu.Lock()
@@ -155,7 +161,7 @@ func TestRetryThenSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows[0].SimpleMeaning != "recovered after retries" || rows[0].Quality != "medium" {
+	if rows[0].SimpleMeaning != "recovered after retries" || rows[0].Quality != "medium" || rows[0].SelectedMeaning != "to move fast" {
 		t.Errorf("row = %+v", rows[0])
 	}
 	m.mu.Lock()
@@ -171,7 +177,7 @@ func TestNonRetryableStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows[0].SimpleMeaning != "" || rows[0].Quality != "bad" {
+	if rows[0].SimpleMeaning != "" || rows[0].Quality != "bad" || rows[0].SelectedMeaning != "" {
 		t.Errorf("row = %+v", rows[0])
 	}
 	m.mu.Lock()
@@ -187,7 +193,7 @@ func TestQualityNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows[0].SimpleMeaning != "ok def" || rows[0].Quality != "bad" {
+	if rows[0].SimpleMeaning != "ok def" || rows[0].Quality != "bad" || rows[0].SelectedMeaning != "to move fast" {
 		t.Errorf("row = %+v, want quality defaulted to bad", rows[0])
 	}
 }
@@ -198,8 +204,44 @@ func TestEmptySimpleMeaning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows[0].SimpleMeaning != "" || rows[0].Quality != "bad" {
+	if rows[0].SimpleMeaning != "" || rows[0].Quality != "bad" || rows[0].SelectedMeaning != "" {
 		t.Errorf("row = %+v, want empty meaning forced to bad", rows[0])
+	}
+}
+
+func TestSelectedMeaningParaphraseRejected(t *testing.T) {
+	m := newMockChat(t)
+	rows, err := rewriteRows(t, m, Options{APIURL: m.ts.URL, Model: "gpt-4o-mini", Concurrency: 1}, []InRow{inRow("paraphrase", "the model paraphrases the meaning.")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].SelectedMeaning != "" || rows[0].Quality != "bad" {
+		t.Errorf("row = %+v, want unverifiable selected_meaning dropped and quality forced to bad", rows[0])
+	}
+	if rows[0].SimpleMeaning != "to move quickly on your feet" {
+		t.Errorf("simple_meaning = %q, want kept", rows[0].SimpleMeaning)
+	}
+}
+
+func TestSelectedMeaningFieldMissing(t *testing.T) {
+	m := newMockChat(t)
+	rows, err := rewriteRows(t, m, Options{APIURL: m.ts.URL, Model: "gpt-4o-mini", Concurrency: 1}, []InRow{inRow("no-selected", "field absent row.")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].SelectedMeaning != "" || rows[0].Quality != "good" {
+		t.Errorf("row = %+v, want no selected_meaning and quality kept good", rows[0])
+	}
+}
+
+func TestSelectedMeaningEmpty(t *testing.T) {
+	m := newMockChat(t)
+	rows, err := rewriteRows(t, m, Options{APIURL: m.ts.URL, Model: "gpt-4o-mini", Concurrency: 1}, []InRow{inRow("empty-selected", "empty selected row.")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].SelectedMeaning != "" || rows[0].Quality != "medium" {
+		t.Errorf("row = %+v, want no selected_meaning and quality kept medium", rows[0])
 	}
 }
 
@@ -221,6 +263,9 @@ func TestOrdering(t *testing.T) {
 	for i := range input {
 		if rows[i].TargetWord != input[i].TargetWord || rows[i].Phrase != input[i].Phrase {
 			t.Errorf("row %d = %q/%q, want %q/%q (input order violated)", i, rows[i].TargetWord, rows[i].Phrase, input[i].TargetWord, input[i].Phrase)
+		}
+		if rows[i].SelectedMeaning != "to move fast" {
+			t.Errorf("row %d selected_meaning = %q, want %q", i, rows[i].SelectedMeaning, "to move fast")
 		}
 	}
 }
@@ -267,11 +312,17 @@ func TestResume(t *testing.T) {
 	if rows[0].SimpleMeaning != "old" || rows[1].SimpleMeaning != "old" {
 		t.Errorf("pre-existing rows changed: %+v", rows[:2])
 	}
+	if rows[0].SelectedMeaning != "" || rows[1].SelectedMeaning != "" {
+		t.Errorf("pre-existing rows lost backward compat (selected_meaning): %+v", rows[:2])
+	}
 	if rows[2].TargetWord != "b" || rows[3].TargetWord != "d" {
 		t.Errorf("appended rows = %q, %q, want b then d", rows[2].TargetWord, rows[3].TargetWord)
 	}
 	if rows[2].SimpleMeaning != "to move quickly on your feet" || rows[3].SimpleMeaning != "to move quickly on your feet" {
 		t.Errorf("new rows not rewritten: %+v", rows[2:])
+	}
+	if rows[2].SelectedMeaning != "to move fast" || rows[3].SelectedMeaning != "to move fast" {
+		t.Errorf("new rows selected_meaning = %q, %q, want both %q", rows[2].SelectedMeaning, rows[3].SelectedMeaning, "to move fast")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -285,6 +336,52 @@ func TestKeyDeterminism(t *testing.T) {
 	want := hex.EncodeToString(sum[:])
 	if got := makeKey("running", "they were running."); got != want {
 		t.Errorf("makeKey = %q, want %q", got, want)
+	}
+}
+
+func TestMatchMeaning(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		meanings []string
+		want     string
+		wantOK   bool
+	}{
+		{"exact match", "to move fast", []string{"to move fast", "to operate"}, "to move fast", true},
+		{"parentheses stripped", "to make small adjustments to something until it is optimal", []string{"to make small adjustments to (something) until it is optimal"}, "to make small adjustments to (something) until it is optimal", true},
+		{"capitalization and punctuation", "To Move, Fast!", []string{"to move fast"}, "to move fast", true},
+		{"word reorder", "fast to move", []string{"to move fast"}, "to move fast", true},
+		{"paraphrase different words", "to go quickly", []string{"to move fast"}, "", false},
+		{"empty raw", "", []string{"to move fast"}, "", false},
+		{"whitespace only raw", "   ", []string{"to move fast"}, "", false},
+		{"subset of meaning", "to operate", []string{"to operate or function"}, "to operate or function", true},
+		{"tie keeps first entry", "a b c", []string{"a b c", "b c a"}, "a b c", true},
+		{"empty meanings", "to move fast", nil, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := matchMeaning(tt.raw, tt.meanings)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("matchMeaning(%q, %v) = (%q, %v), want (%q, %v)", tt.raw, tt.meanings, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestNormalize(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"Hello World", "hello world"},
+		{"To move, FAST!", "to move fast"},
+		{"to make small adjustments to (something) until it is optimal", "to make small adjustments to something until it is optimal"},
+		{"to   move   fast", "to move fast"},
+		{"what's up?", "whats up"},
+		{"", ""},
+		{"!!!", ""},
+	}
+	for _, tt := range tests {
+		if got := normalize(tt.in); got != tt.want {
+			t.Errorf("normalize(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 

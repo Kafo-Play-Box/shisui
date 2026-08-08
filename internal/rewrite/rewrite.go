@@ -19,6 +19,9 @@ import (
 	"sync"
 	"text/template"
 	"time"
+	"unicode"
+
+	_ "embed"
 
 	"github.com/kafo-play-box/shisui/internal/jsonl"
 )
@@ -34,14 +37,15 @@ type InRow struct {
 
 // OutRow is an InRow with an LLM definition and quality label.
 type OutRow struct {
-	TargetWord    string   `json:"target_word"`
-	RootWord      string   `json:"root_word"`
-	Phrase        string   `json:"phrase"`
-	IPA           string   `json:"ipa"`
-	Meanings      []string `json:"meanings"`
-	SimpleMeaning string   `json:"simple_meaning"`
-	Quality       string   `json:"quality"`
-	Key           string   `json:"_key"`
+	TargetWord      string   `json:"target_word"`
+	RootWord        string   `json:"root_word"`
+	Phrase          string   `json:"phrase"`
+	IPA             string   `json:"ipa"`
+	Meanings        []string `json:"meanings"`
+	SimpleMeaning   string   `json:"simple_meaning"`
+	Quality         string   `json:"quality"`
+	SelectedMeaning string   `json:"selected_meaning"`
+	Key             string   `json:"_key"`
 }
 
 // Options controls the rewrite pipeline.
@@ -175,7 +179,7 @@ func processJob(ctx context.Context, opts Options, j job) result {
 		Meanings:   j.row.Meanings,
 		Key:        j.key,
 	}
-	out, err := callLLM(ctx, opts, j.row)
+	out, err := callLLM(ctx, opts, j.row, j.row.Meanings)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rewrite: warning: %s: %v\n", j.row.TargetWord, err)
 		base.Quality = "bad"
@@ -183,6 +187,7 @@ func processJob(ctx context.Context, opts Options, j job) result {
 	}
 	base.SimpleMeaning = out.SimpleMeaning
 	base.Quality = out.Quality
+	base.SelectedMeaning = out.SelectedMeaning
 	return result{seq: j.seq, row: base, failed: false}
 }
 
@@ -220,11 +225,12 @@ func writeOrdered(resultsCh <-chan result, w io.Writer, total int) error {
 }
 
 type llmResult struct {
-	SimpleMeaning string
-	Quality       string
+	SimpleMeaning   string
+	Quality         string
+	SelectedMeaning string // raw model response, before matching
 }
 
-func callLLM(ctx context.Context, opts Options, row InRow) (llmResult, error) {
+func callLLM(ctx context.Context, opts Options, row InRow, meanings []string) (llmResult, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -232,7 +238,7 @@ func callLLM(ctx context.Context, opts Options, row InRow) (llmResult, error) {
 			delay = time.Duration(float64(delay) * (0.8 + 0.4*rand.Float64()))
 			time.Sleep(delay)
 		}
-		out, err := doCall(ctx, opts, row)
+		out, err := doCall(ctx, opts, row, meanings)
 		if err == nil {
 			return out, nil
 		}
@@ -244,7 +250,7 @@ func callLLM(ctx context.Context, opts Options, row InRow) (llmResult, error) {
 	return llmResult{}, lastErr
 }
 
-func doCall(ctx context.Context, opts Options, row InRow) (llmResult, error) {
+func doCall(ctx context.Context, opts Options, row InRow, meanings []string) (llmResult, error) {
 	body, err := buildBody(opts, row)
 	if err != nil {
 		return llmResult{}, err
@@ -272,7 +278,7 @@ func doCall(ctx context.Context, opts Options, row InRow) (llmResult, error) {
 	if len(cr.Choices) == 0 {
 		return llmResult{}, errors.New("rewrite: empty choices")
 	}
-	return parseContent(cr.Choices[0].Message.Content)
+	return parseContent(cr.Choices[0].Message.Content, meanings)
 }
 
 type apiError struct{ code int }
@@ -287,19 +293,28 @@ func retryable(err error) bool {
 	return true
 }
 
-func parseContent(content string) (llmResult, error) {
+func parseContent(content string, meanings []string) (llmResult, error) {
 	var parsed struct {
-		SimpleMeaning string `json:"simple_meaning"`
-		Quality       string `json:"quality"`
+		SimpleMeaning   string `json:"simple_meaning"`
+		Quality         string `json:"quality"`
+		SelectedMeaning string `json:"selected_meaning"`
 	}
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
 		return llmResult{}, err
 	}
 	if strings.TrimSpace(parsed.SimpleMeaning) == "" {
-		return llmResult{Quality: "bad"}, nil
+		return llmResult{Quality: "bad", SelectedMeaning: ""}, nil
 	}
 	q := parsed.Quality
 	if q != "good" && q != "medium" && q != "bad" {
+		q = "bad"
+	}
+	verbatim, matched := matchMeaning(parsed.SelectedMeaning, meanings)
+	if matched {
+		return llmResult{SimpleMeaning: parsed.SimpleMeaning, Quality: q, SelectedMeaning: verbatim}, nil
+	}
+	if strings.TrimSpace(parsed.SelectedMeaning) != "" {
+		// The model claimed a meaning we cannot verify against the list.
 		q = "bad"
 	}
 	return llmResult{SimpleMeaning: parsed.SimpleMeaning, Quality: q}, nil
@@ -326,30 +341,15 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
-var userPromptTmpl = template.Must(template.New("user").Parse(`Word: {{.TargetWord}}
-Phrase: "{{.Phrase}}"
-Dictionary meanings:
-{{range .Meanings}}- {{.}}
-{{end}}Return JSON with exactly these fields:
-{
-  "simple_meaning": "your short, simple definition",
-  "quality": "good" | "medium" | "bad"
-}
+//go:embed prompts/system.txt
+var systemPromptBytes []byte
 
-Quality guide:
-- "good": phrase context clearly matches one dictionary meaning, definition is accurate and simple.
-- "medium": context somewhat matches but the meaning could apply to other words too, or definition is a bit vague.
-- "bad": phrase lacks enough context to pick the right meaning from the dictionary list.
-`))
+//go:embed prompts/user.txt
+var userPromptBytes []byte
 
-const systemPrompt = `You are an ESL flashcard definition writer. Given a word used in a phrase and its dictionary meanings, write a short, clear English definition that helps an ESL learner understand the word's usage in that specific context.
+var userPromptTmpl = template.Must(template.New("user").Parse(string(userPromptBytes)))
 
-Rules:
-- Use ONLY the provided dictionary meanings. Do not invent new meanings.
-- Write in Simple English (CEFR A2-B1 vocabulary).
-- Keep the definition under 25 words.
-- Be unambiguous. If the phrase doesn't give enough context to pick the right meaning, say so in the quality field.
-- Return ONLY valid JSON. No other text.`
+var systemPrompt = string(systemPromptBytes)
 
 func buildBody(opts Options, row InRow) (io.Reader, error) {
 	var ub bytes.Buffer
@@ -376,4 +376,66 @@ func buildBody(opts Options, row InRow) (io.Reader, error) {
 func makeKey(target, phrase string) string {
 	sum := sha256.Sum256([]byte(target + "\x00" + phrase))
 	return hex.EncodeToString(sum[:])
+}
+
+// normalize lowercases s, drops everything that is not a letter, digit, or
+// whitespace (punctuation, hyphens, parentheses), and collapses whitespace
+// runs to single spaces. "To move, FAST!" -> "to move fast".
+func normalize(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
+			b.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func tokenSet(s string) map[string]bool {
+	fields := strings.Fields(s)
+	set := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		set[f] = true
+	}
+	return set
+}
+
+// matchThreshold is the minimum overlap ratio (model tokens ∩ meaning tokens,
+// over model tokens) required to accept the model's selected_meaning as a
+// verbatim match of a provided meaning. Small models paraphrase instead of
+// copying, so the match is done tool-side on normalized tokens.
+const matchThreshold = 0.80
+
+// matchMeaning reports whether the model's raw selected_meaning matches one of
+// the provided meanings by normalized token overlap, returning the verbatim
+// list entry. Comparison is strict; ties keep the earlier list entry.
+func matchMeaning(raw string, meanings []string) (string, bool) {
+	if strings.TrimSpace(raw) == "" || len(meanings) == 0 {
+		return "", false
+	}
+	normRaw := normalize(raw)
+	if normRaw == "" {
+		return "", false
+	}
+	modelSet := tokenSet(normRaw)
+	bestIdx := -1
+	bestRatio := 0.0
+	for i, m := range meanings {
+		meaningSet := tokenSet(normalize(m))
+		inter := 0
+		for tok := range modelSet {
+			if meaningSet[tok] {
+				inter++
+			}
+		}
+		ratio := float64(inter) / float64(len(modelSet))
+		if ratio > bestRatio {
+			bestRatio = ratio
+			bestIdx = i
+		}
+	}
+	if bestIdx >= 0 && bestRatio >= matchThreshold {
+		return meanings[bestIdx], true
+	}
+	return "", false
 }
