@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""LoRA fine-tune of google/gemma-3-270m on shisui flashcard rows.
+"""LoRA fine-tune of google/gemma-3-270m-it on shisui flashcard rows.
 
 What this does, in plain words:
   1. Loads the small Gemma model (already good at language) and the tokenizer.
   2. Reads the 20 training rows: each row has an "input" (word + phrase +
      meanings) and the "answer" the model should learn to produce (quality,
-     simple_meaning, selected_meaning) — the exact output the rewrite stage
-     generated with DeepSeek.
+     simple_meaning, selected_meaning, predicted_ipa) — the exact output the
+     rewrite stage generated with DeepSeek, plus the IPA the model must learn
+     to pronounce on its own.
   3. Attaches LoRA: tiny trainable adapters on a few weight matrices. The
      original model weights stay frozen, so we train a handful of parameters
      instead of all 270M. That is the LoRA trick — cheap and fast.
@@ -14,6 +15,11 @@ What this does, in plain words:
      the answer part (the prompt is masked), so the model learns to write the
      answer, not to repeat the question.
   5. Saves ONLY the adapter (a few MB), not the whole model.
+
+IPA is deliberately NOT in the input prompt. If it were, the model would learn
+to copy the line instead of learning pronunciation; by predicting it, the model
+becomes useful even when the dictionary lookup has no IPA. The IPA in the
+training rows is used only as the expected `predicted_ipa` answer.
 
 Run it on a Colab VM:  upload this script + the data + your HF token, then
 `python3 finetune_run.py`. The adapter lands in /content/lora-adapter.
@@ -76,23 +82,27 @@ def read_hf_token():
 
 
 def make_user_prompt(row):
-    """Mirror the shisui rewrite prompt: word, phrase, IPA, meanings."""
+    """Mirror the shisui rewrite prompt: word, phrase, meanings. IPA is
+    deliberately omitted so the model must learn to predict it (it appears
+    only in the expected answer)."""
     meanings = "\n".join(f"- {m}" for m in row["meanings"])
     return (
         f"Word: {row['target_word']}\n"
         f"Root: {row['root_word']}\n"
         f'Phrase: "{row["phrase"]}"\n'
-        f"IPA: {row['ipa']}\n"
         f"Dictionary meanings:\n{meanings}\n"
     )
 
 
 def make_answer(row):
-    """The exact JSON the model must learn to write."""
+    """The exact JSON the model must learn to write, including the IPA it has
+    to pronounce from the word alone."""
+    ipa = row.get("ipa", "")
     return (
         f'{{"quality": "{row["quality"]}", '
         f'"simple_meaning": "{row["simple_meaning"]}", '
-        f'"selected_meaning": "{row["selected_meaning"]}"}}'
+        f'"selected_meaning": "{row["selected_meaning"]}", '
+        f'"predicted_ipa": "{ipa}"}}'
     )
 
 

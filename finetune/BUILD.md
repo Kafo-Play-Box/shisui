@@ -1,6 +1,9 @@
 # BUILD.md — LoRA → Q6_K GGUF pipeline log
 
-Machine: 2-core i3 (4 threads), 7.5 GB RAM, CPU-only. All paths relative to the project's gitignored `tmp/` dir.
+This is a log of one specific run on one specific machine (the machine this
+project was developed on: a 2-core i3, 7.5 GB RAM, CPU-only). The commands
+generalize to any machine; the sizes and counts below are from that run.
+All paths relative to the project's gitignored `tmp/` dir.
 Deliverable: `gemma-3-270m-it-q6_k.gguf` (merged LoRA finetune, Q6_K).
 Toolchain: llama.cpp b10223 (commit 11924d4c17, tag `b10223`) — runtime and converter match exactly.
 
@@ -13,7 +16,7 @@ Key output: base model downloaded/cached under `tmp/gguf-build/base` (verified c
 
 ## 2. Merge LoRA — exit 0
 ```
-tmp/venv/bin/python tmp/gguf-build/merge.py tmp/gguf-build/base lora-adapter tmp/gguf-build/merged
+tmp/venv/bin/python finetune/merge.py tmp/gguf-build/base lora-adapter tmp/gguf-build/merged
 ```
 `merge.py`: load base `dtype=torch.bfloat16` (transformers v5), wrap `PeftModel.from_pretrained`, `merge_and_unload()`, save with `safe_serialization=True`, save tokenizer, copy `tokenizer.model` + `chat_template.jinja` from base, assert all 5 required files.
 Key output: `MERGED_DIR: tmp/gguf-build/merged` — contains model.safetensors (536,223,056 B), config.json, tokenizer.model, chat_template.jinja, tokenizer_config.json (+ tokenizer.json, generation_config.json).
@@ -68,8 +71,8 @@ Size: **282,975,360 B ≈ 270 MB** (not ~220 MB — see deviations). The warning
 - `tmp/gguf-build/gemma-3-270m-it-q6_k.gguf` — 282,975,360 B (deliverable)
 - `tmp/gguf-build/gemma-3-270m-it-f16.gguf` — 542,835,840 B (f16 reference)
 - `tmp/gguf-build/merged/` — merged HF model (536 MB safetensors)
-- `tmp/gguf-build/merge.py` — merge script
-- `tmp/gguf-build/chat_request_census.json` / `chat_response_census.json` — verification artifacts
+- `finetune/merge.py` — merge script
+- `finetune/chat_request_census.json` / `tmp/gguf-build/chat_response_census.json` — verification artifacts
 
 ## Deviations
 - Q6_K file is 270 MB, not the estimated ~220 MB: 90/236 tensors fall back to q8_0 (block-size mismatch), 109 norms stay f32. This is llama-quantize default behavior, deterministic across runs.
