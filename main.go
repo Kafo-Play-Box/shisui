@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -51,13 +52,13 @@ func usage() {
 	fmt.Fprint(os.Stderr, `shisui <command> [flags]
 
 commands:
-  scrape   [--force] [-o PATH] <input.html | input-dir | URL
+  scrape   [--force] [-o PATH] <input.html | input-dir | input.zim | URL
   extract  [--lemma PATH] [--min-words N] [--max-words N] [--min-target-len N] [--force] [-o PATH] <input.txt
   augment  [--yomitan-url URL] [--yomitan-timeout DUR] [--concurrency N] [--force] [-o PATH] <input.jsonl
   rewrite  --api-url URL [--api-key KEY] [--model NAME] [--concurrency N] [--resume] [--force] -o PATH <input.jsonl
 
 input is read from stdin, or from a positional file argument.
-scrape additionally accepts a directory or an http(s) URL.
+scrape additionally accepts a directory, a .zim file, or an http(s) URL.
 `)
 }
 
@@ -84,6 +85,8 @@ func cmdScrape(args []string) error {
 	switch {
 	case strings.HasPrefix(arg, "http://"), strings.HasPrefix(arg, "https://"):
 		return scrapeURL(arg, out)
+	case strings.HasSuffix(strings.ToLower(arg), ".zim"):
+		return zimdumpRun(arg, out)
 	default:
 		fi, err := os.Stat(arg)
 		if err != nil {
@@ -138,6 +141,15 @@ func scrapeDir(dir string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	return scrapeFileList(files, w)
+}
+
+// scrapeFileList sorts files and scrapes each into w, one blank line between
+// documents. A file that fails to open or parse is logged to stderr and
+// skipped; a file that scrapes to nothing (e.g. a redirect stub) is skipped.
+// Only one file's output is held in memory at a time. Returns the first write
+// error.
+func scrapeFileList(files []string, w io.Writer) error {
 	sort.Strings(files)
 	first := true
 	for _, path := range files {
@@ -167,6 +179,70 @@ func scrapeDir(dir string, w io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// zimNamespace is the ZIM article namespace scraped (Kiwix/Wikipedia). It is
+// passed to zimdump as --ns=A; zim-tools 3.7.0 ignores the filter on dump and
+// writes every namespace, so scrapeAllFiles skips the resource dirs.
+const zimNamespace = "A"
+
+// zimdumpRun dumps zimPath with the zimdump binary and scrapes every article
+// in the dump into w. Overridable in tests.
+var zimdumpRun = func(zimPath string, w io.Writer) error {
+	absPath, err := filepath.Abs(zimPath)
+	if err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("zimdump"); err != nil {
+		return errors.New("zimdump not found; install zim-tools (e.g. pacman -S zim-tools)")
+	}
+	tmpDir, err := os.MkdirTemp("", "shisui-zim-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	cmd := exec.Command("zimdump", "dump", "--dir="+tmpDir, "--ns="+zimNamespace, absPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if len(msg) > 500 {
+			msg = msg[len(msg)-500:]
+		}
+		return fmt.Errorf("zimdump: %v: %s", err, msg)
+	}
+	return scrapeAllFiles(tmpDir, w)
+}
+
+// scrapeAllFiles walks dir for every regular file except dump_errors.log and
+// scrapes each into w via scrapeFileList. Used for zimdump dump output
+// directories, whose articles are extensionless and nested (slash paths in
+// subdirs, escaped paths in _exceptions/). The Kiwix resource directories
+// (_res_, _mw_, _assets_, _webp_) hold CSS/JS/images from other namespaces;
+// zimdump's --ns=A filter is a no-op in zim-tools 3.7.0, so they appear in
+// the dump and are skipped here — their content is not article prose.
+func scrapeAllFiles(dir string, w io.Writer) error {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == "_res_" || d.Name() == "_mw_" || d.Name() == "_assets_" || d.Name() == "_webp_" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == "dump_errors.log" {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return scrapeFileList(files, w)
 }
 
 // writeAll writes b to w, looping over partial writes until all bytes are

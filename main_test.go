@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -102,6 +106,148 @@ func TestScrapeURLMode_Error(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// writeFixture writes rel under dir, creating parent directories.
+func writeFixture(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	p := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// zimFixtureDir populates dir like a zimdump dump: extensionless articles,
+// nested subdirs for slash paths, an _exceptions/ dir, resource dirs, and a
+// dump_errors.log. Returns the dir.
+func zimFixtureDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFixture(t, dir, "ArticleOne", "<p>First article.</p>")
+	writeFixture(t, dir, "ArticleTwo", "<p>Second article.</p>")
+	writeFixture(t, dir, filepath.Join("Medicine", "Bone"), "<p>Bone article.</p>")
+	writeFixture(t, dir, filepath.Join("_exceptions", "Encoded%2fPath"), "<p>Encoded path article.</p>")
+	writeFixture(t, dir, "dump_errors.log", "some error log text")
+	// Resource dirs come from non-A namespaces; their content must not leak.
+	writeFixture(t, dir, filepath.Join("_res_", "junk.css"), "<p>resource junk css</p>")
+	writeFixture(t, dir, filepath.Join("_mw_", "junk.js"), "<p>resource junk js</p>")
+	return dir
+}
+
+func TestScrapeAllFiles(t *testing.T) {
+	var buf bytes.Buffer
+	if err := scrapeAllFiles(zimFixtureDir(t), &buf); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.String()
+	for _, want := range []string{"First article.", "Second article.", "Bone article.", "Encoded path article."} {
+		if !strings.Contains(data, want) {
+			t.Errorf("output missing %q:\n%s", want, data)
+		}
+	}
+	for _, bad := range []string{"some error log text", "resource junk css", "resource junk js"} {
+		if strings.Contains(data, bad) {
+			t.Errorf("output contains %q:\n%s", bad, data)
+		}
+	}
+}
+
+func TestScrapeZimMode(t *testing.T) {
+	orig := zimdumpRun
+	zimdumpRun = func(zimPath string, w io.Writer) error {
+		return scrapeAllFiles(zimFixtureDir(t), w)
+	}
+	defer func() { zimdumpRun = orig }()
+	out := filepath.Join(t.TempDir(), "out.txt")
+	if err := cmdScrape([]string{"-o", out, "test.zim"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"First article.", "Second article.", "Bone article.", "Encoded path article."} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("output missing %q: %q", want, data)
+		}
+	}
+}
+
+func TestScrapeZimMode_RedirectStubSkipped(t *testing.T) {
+	orig := zimdumpRun
+	zimdumpRun = func(zimPath string, w io.Writer) error {
+		dir := t.TempDir()
+		writeFixture(t, dir, "ArticleOne", "<p>Zim article one.</p>")
+		writeFixture(t, dir, "RedirectStub", `<meta http-equiv="refresh" content="0;url=/A/Target">`)
+		return scrapeAllFiles(dir, w)
+	}
+	defer func() { zimdumpRun = orig }()
+	out := filepath.Join(t.TempDir(), "out.txt")
+	if err := cmdScrape([]string{"-o", out, "test.zim"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Zim article one.") {
+		t.Errorf("output missing article: %q", data)
+	}
+	for _, bad := range []string{"Target", "refresh", "RedirectStub"} {
+		if strings.Contains(string(data), bad) {
+			t.Errorf("output contains stub content %q: %q", bad, data)
+		}
+	}
+}
+
+func TestScrapeZimMode_NoZimdump_Error(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	var buf bytes.Buffer
+	err := zimdumpRun("test.zim", &buf)
+	if err == nil {
+		t.Fatal("expected error when zimdump is not on PATH")
+	}
+	if !strings.Contains(err.Error(), "zimdump not found") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestScrapeZimIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping ZIM integration test in -short mode")
+	}
+	if _, err := exec.LookPath("zimdump"); err != nil {
+		t.Skip("zimdump not installed")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot resolve home dir: %v", err)
+	}
+	zimPath := filepath.Join(home, ".local/share/kiwix-desktop/wikipedia_en_100_nopic_2026-07.zim")
+	if _, err := os.Stat(zimPath); err != nil {
+		t.Skipf("ZIM file not present: %v", err)
+	}
+	out := filepath.Join(t.TempDir(), "out.txt")
+	if err := cmdScrape([]string{"-o", out, zimPath}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("ZIM scrape produced no output")
+	}
+	if got := strings.Count(string(data), "\n\n"); got < 10 {
+		t.Errorf("blank-line blocks = %d, want >= 10", got)
+	}
+	junk := regexp.MustCompile(`vector-toc|mw-editsection|catlinks|Jump to content|Related articles`)
+	if m := junk.Find(data); m != nil {
+		t.Errorf("output contains chrome junk %q", m)
 	}
 }
 

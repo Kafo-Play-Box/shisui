@@ -21,6 +21,9 @@ func Run(r io.Reader, w io.Writer) error {
 	}
 	s := &runState{}
 	walk(doc, s)
+	if s.redirect {
+		return nil
+	}
 	out := strings.Join(s.blocks, "\n\n")
 	if out == "" {
 		return nil
@@ -34,8 +37,9 @@ func Run(r io.Reader, w io.Writer) error {
 // guarantees exactly one blank line between blocks and no leading or
 // trailing blank lines.
 type runState struct {
-	buf    strings.Builder // inline text of the block being collected
-	blocks []string        // finished blocks
+	buf      strings.Builder // inline text of the block being collected
+	blocks   []string        // finished blocks
+	redirect bool            // document is a redirect stub; emit nothing
 }
 
 // flush collapses the buffer's whitespace and emits it as one block.
@@ -88,13 +92,21 @@ func walk(root *html.Node, s *runState) {
 			continue
 		}
 		switch n.Data {
+		case "title":
+			// <title> is head metadata, never body content.
+			continue
 		case "br":
 			s.buf.WriteByte(' ')
 			continue
 		case "img":
 			s.emitAlt(n)
 			continue
-		case "meta", "link":
+		case "meta":
+			if strings.EqualFold(getAttr(n, "http-equiv"), "refresh") {
+				s.redirect = true
+			}
+			continue
+		case "link":
 			continue
 		}
 		if isBlock(n) {

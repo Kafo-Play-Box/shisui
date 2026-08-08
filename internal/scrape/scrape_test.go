@@ -54,6 +54,24 @@ func TestImageAlt(t *testing.T) {
 	}
 }
 
+func TestTitleDropped(t *testing.T) {
+	out := run(t, `<html><head><title>Bash - ArchWiki</title></head><body><p>Real prose.</p></body></html>`)
+	if out != "Real prose." {
+		t.Errorf("got %q, want %q", out, "Real prose.")
+	}
+	if strings.Contains(out, "ArchWiki") {
+		t.Errorf("title leaked into output: %q", out)
+	}
+}
+
+func TestRedirectStubEmpty(t *testing.T) {
+	// A redirect stub (meta refresh + title + link) is not content.
+	out := run(t, `<html><head><title>Transmission of HIV/AIDS</title><meta http-equiv="refresh" content="0;URL='../HIV/AIDS#Transmission'"></head><body><a href="../HIV/AIDS#Transmission">Transmission of HIV/AIDS</a></body></html>`)
+	if out != "" {
+		t.Errorf("redirect stub produced output %q, want empty", out)
+	}
+}
+
 func TestMediaWikiFixture(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "mediawiki_fixture.html"))
 	if err != nil {
